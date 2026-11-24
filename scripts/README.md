@@ -26,6 +26,12 @@ want. Run them from the repository root with Node 22 unless noted.
 | `de-name-rules.mjs` | The German exercise-name rules. `frontend/src/lib/exercise-names.test.js` holds every German name to them |
 | `catalogue/migration-check.mjs` | Before a catalogue change ships: compares old and new catalogue on copies of real profiles |
 
+## Deploying
+
+| Script | When |
+|---|---|
+| `deploy/spike.mjs` | Before trusting a split deployment (API on one host, static web on another): measures what the proxy does with bodies, headers, cookies and origins. See [docs/DEPLOY_RAILWAY_VERCEL.md](../docs/DEPLOY_RAILWAY_VERCEL.md) |
+
 Frontend-only helpers (locale checks, bundle size, the service worker stamp) live in
 `frontend/scripts/`, and the API's in `api/scripts/`.
 

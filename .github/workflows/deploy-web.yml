@@ -1,0 +1,109 @@
+# Deploys the web app to Vercel. The API lives on Railway (see railway.json).
+#
+# openGym is a single-origin app: the browser talks to one hostname, which serves the static
+# shell and proxies /api to the API. That is what the rewrite in vercel.json is for, and why the
+# API is never addressed directly by the browser. Break that and passkeys and sessions stop
+# working — see docs/DEPLOY_RAILWAY_VERCEL.md and
+# strategy/runbooks/scenario-split-paas-deployment.md in the agency-agents checkout.
+#
+# Actions is the ONLY production deployer. Vercel's own Git integration must stay disabled, or
+# every merge deploys twice and a red check no longer blocks a release.
+#
+# Why `workflow_run` and not `push`: a push trigger starts this workflow beside `Tests`, so it can
+# publish while `tests-ok` is still red. Railway has "Wait for CI"; Vercel does not, so the gate is
+# here: deploy only after the `Tests` run for that same commit finished successfully.
+#
+# There is deliberately NO path filter. A list of "files that affect the web build" is a guess —
+# miss one (the catalogue that feeds stage-media.mjs, a coach asset) and production goes stale with
+# nothing red to show for it. A redeploy of unchanged content after a docs merge is a few minutes;
+# a silently missed deploy is a bug nobody sees. `workflow_dispatch` redeploys by hand.
+#
+# Phase 0 of the runbook runs by hand before this ever fires: scripts/deploy/spike.mjs measures
+# what the proxy does with bodies, headers, cookies and origins. No config substitutes for it.
+name: Deploy web (Vercel)
+
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never two production deploys at once, and never cancel one that already aliased the domain.
+  group: deploy-web-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # After a merge: only a green Tests run on main. By hand: whatever was dispatched. A pull
+    # request run never reaches main, and must never publish.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    # A required reviewer on this environment is the human decision behind every production
+    # deploy. Set it in Settings -> Environments -> production.
+    environment: production
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      SITE_URL: https://app.opengy.app
+      API_URL: https://api.opengy.app
+    steps:
+      # The commit whose tests passed — not the workflow's own checkout, which is the default
+      # branch for a `workflow_run` event.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      # The runtime is pinned here, not chosen by the platform's build image: the app is built and
+      # tested on node:26-alpine (api/Dockerfile, web/Dockerfile, .github/workflows/test.yml).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      # Pinned like the actions are: a floating CLI can change a flag under a green pipeline.
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@66.6.0
+
+      - name: Resolve the project and its production environment
+        run: vercel pull --yes --environment=production
+
+      # vercel build runs vercel.json's installCommand and buildCommand on this runner, so the
+      # artifact is built with node 26 no matter what the platform ships.
+      - name: Build the deployment artifact
+        run: vercel build --prod
+
+      # The 180 px exercise stills and animations are not part of the Vite bundle: the container
+      # copied them in, and a static host does not. Without this the app loads and every exercise
+      # shows a blank tile.
+      - name: Assert the exercise media was staged
+        run: |
+          test -d frontend/dist/exercise-media/still || {
+            echo "::error::frontend/dist/exercise-media is missing: stage-media.mjs did not run"
+            exit 1
+          }
+          count=$(find frontend/dist/exercise-media -type f | wc -l)
+          echo "staged $count media files"
+          test "$count" -gt 100 || {
+            echo "::error::only $count media files staged, expected the whole catalogue"
+            exit 1
+          }
+
+      - name: Deploy to production
+        run: vercel deploy --prebuilt --prod
+
+      # The same checks Phase 0 measured, run against what is actually serving traffic. An API
+      # outage blocks a web deploy on purpose: a shell that cannot reach /api is not deployable.
+      - name: Verify the deployment
+        run: |
+          curl -fsSI "$SITE_URL/" | grep -qi '^content-security-policy:'
+          curl -fsS "$API_URL/api/health" | grep -q '"ok":true'
+          echo "shell headers and API health OK"

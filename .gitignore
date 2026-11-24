@@ -9,6 +9,9 @@ data/
 # Local config
 .env
 
+# Phase 0 deploy evidence: scripts/deploy/spike.mjs writes one file per run. Run output, not source.
+docs/evidence/
+
 # Build output / deps
 frontend/dist/
 node_modules/
